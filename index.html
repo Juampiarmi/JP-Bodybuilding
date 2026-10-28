@@ -2357,7 +2357,7 @@ function jpLimpiarNombreEj(s){
 <footer class="site-footer">
   <p><b>Coach JP</b> — Programación generada para Juampi Armiñana</p>
   <p>Mesociclo de 4 semanas · Planificación personalizada para Juampi Armiñana</p>
-  <p class="jp-build">build 27/10 21:30</p>
+  <p class="jp-build">build 27/10 22:12</p>
 </footer>
 <div id="guideModal" class="modal-overlay">
   <div class="modal modal-wide">
@@ -3595,20 +3595,30 @@ function wireReadinessCheckin(day, weekIdx){
    AUDIO
 ========================================================= */
 let _audioCtx = null;
+var _audioFallo = false;
 function ensureAudioCtx(){
-  if(!_audioCtx){
+  /* El audio NUNCA puede romper la app: aqui no se lanza ninguna excepcion. Sin Web Audio (o si el constructor falla) devuelve null y
+     todos los llamadores simplemente no suenan. El contexto no se crea al cargar la pagina: nace en el primer gesto o el primer aviso. */
+  if(_audioCtx || _audioFallo) return _audioCtx;
+  try{
     var AC = window.AudioContext || window.webkitAudioContext;
+    if(!AC){ _audioFallo = true; return null; }
     /* latencyHint "interactive": el menor retardo posible entre el evento del timer y el tono */
     try{ _audioCtx = new AC({ latencyHint: 'interactive' }); }catch(e){ _audioCtx = new AC(); }
     /* iOS 16.4+: sesion de audio "playback" -> los avisos suenan aunque el interruptor de silencio del iPhone este activo */
     try{ if(navigator.audioSession) navigator.audioSession.type = 'playback'; }catch(e2){}
-  }
+    /* si el sistema lo interrumpe (llamada, bloqueo de pantalla), queda a la espera del proximo toque */
+    try{ _audioCtx.addEventListener('statechange', function(){ if(_audioCtx && _audioCtx.state !== 'running' && window.__jpArmarAudio) window.__jpArmarAudio(); }); }catch(e3){}
+  }catch(e4){ _audioCtx = null; _audioFallo = true; }
   return _audioCtx;
 }
-function resumeAudioCtx(){ try{ const ctx = ensureAudioCtx(); if(ctx.state !== 'running') ctx.resume().catch(function(){}); }catch(e){} }
+/* reanuda el contexto SOLO si ya existe (no lo crea: se llama tambien al volver a la pestana, sin gesto) */
+function resumeAudioCtx(){ try{ if(_audioCtx && _audioCtx.state !== 'running'){ var p = _audioCtx.resume(); if(p && p.catch) p.catch(function(){}); } }catch(e){} }
+/* gesto del usuario: aqui si se crea (si hace falta) y se reanuda */
+function gestoAudio(){ try{ ensureAudioCtx(); resumeAudioCtx(); }catch(e){} }
 function unlockAudio(){
   try{
-    const ctx = ensureAudioCtx(); resumeAudioCtx();
+    const ctx = ensureAudioCtx(); if(!ctx) return; resumeAudioCtx();
     /* buffer silencioso de 1 muestra dentro del gesto: es lo que Safari/iOS exige para habilitar el contexto */
     const buf = ctx.createBuffer(1, 1, 22050), src = ctx.createBufferSource();
     src.buffer = buf; src.connect(ctx.destination); src.start(0);
@@ -3620,7 +3630,7 @@ function unlockAudio(){
     try{ if(window.jpPerfilSonido && jpPerfilSonido.calentar) jpPerfilSonido.calentar(); }catch(e3){}
   }catch(e){}
 }
-['touchstart','pointerdown','click'].forEach(function(evt){ document.addEventListener(evt, resumeAudioCtx, { passive: true }); });
+['touchstart','pointerdown','click'].forEach(function(evt){ try{ document.addEventListener(evt, gestoAudio, { passive: true }); }catch(e){} });
 ['visibilitychange','pageshow','focus'].forEach(function(evt){ (evt === 'visibilitychange' ? document : window).addEventListener(evt, function(){ if(evt !== 'visibilitychange' || document.visibilityState === 'visible') resumeAudioCtx(); }); });
 function isAudioMuted(){
   try{ return localStorage.getItem('jp_audio_muted') === '1'; }catch(e){ return false; }
@@ -3628,7 +3638,7 @@ function isAudioMuted(){
 function playBeep(freq, dur, peakGain, delay, type){
   if(isAudioMuted()) return;
   try{
-    const ctx = ensureAudioCtx(); resumeAudioCtx();
+    const ctx = ensureAudioCtx(); if(!ctx) return; resumeAudioCtx();
     const start = ctx.currentTime + (delay || 0);
     const osc = ctx.createOscillator(); const gain = ctx.createGain();
     osc.type = type || 'sine'; osc.frequency.setValueAtTime(freq, start);
@@ -3688,25 +3698,33 @@ var jpPerfilSonido = (function(){
     nodo.connect(g); g.connect(salida(ctx));
     osc.start(t0); osc.stop(t0 + o.d + 0.03);
   }
-  /* 3 - 2 - 1: volumen creciente junto con la altura */
+  /* 3 - 2 - 1: tonos con cuerpo (~0.6 s). Seno + seno desafinado 0.2 % (la nota "respira") + triangular filtrada (calidez) + 2.º y 3.er armonico,
+     con ataque suave de 10-15 ms, un sustain corto y una caida larga y gradual. Volumen creciente junto con la altura. */
   function pip(ctx, n){
-    var f = HZ[n] || HZ[3], v = n === 1 ? 0.26 : (n === 2 ? 0.22 : 0.18), d = 0.13;
-    parcial(ctx, { f: f, d: d, v: v, atk: 0.004 });
-    parcial(ctx, { f: f * 2, d: d * 0.6, v: v * 0.3, atk: 0.003 });
-    parcial(ctx, { f: f * 2.76, d: d * 0.35, v: v * 0.1, atk: 0.002 });
+    var f = HZ[n] || HZ[3], v = n === 1 ? 0.22 : (n === 2 ? 0.19 : 0.16), d = 0.6;
+    parcial(ctx, { f: f, d: d, v: v, atk: 0.012, env: [[0.12, 0.78], [0.34, 0.42], [0.48, 0.14]] });
+    parcial(ctx, { f: f * 1.002, d: d * 0.92, v: v * 0.45, atk: 0.015, env: [[0.14, 0.7], [0.36, 0.3]] });
+    parcial(ctx, { f: f, d: d * 0.8, v: v * 0.5, tipo: 'triangle', lp: f * 3, atk: 0.01, env: [[0.12, 0.65], [0.3, 0.25]] });
+    parcial(ctx, { f: f * 2, d: d * 0.6, v: v * 0.2, atk: 0.012, env: [[0.1, 0.6]] });
+    parcial(ctx, { f: f * 3, d: d * 0.35, v: v * 0.07, atk: 0.01 });
   }
-  /* YA / fin de descanso: campana electronica sostenida (~2 s). Ataque cortante (cuadrada filtrada) + cuerpo de seno con caida en
-     tres tramos (golpe -> sustain -> cola), octava grave y octava brillante para presencia, parcial inarmonico de campana y un segundo seno
-     desafinado 3 cents que genera un batido lento: la nota "respira" y se apaga suave, como una bocina / voz sintetizada alargada */
+  /* YA / fin de descanso: RING metalico sostenido (~2.6 s) tipo timbre de gimnasio / ring de boxeo.
+     - nucleo: 5 senos desafinados entre si (-0.4 % ... +0.5 %) alrededor de 1174.66 Hz -> batimiento / chorus metalico que vibra en el aire
+     - ataque rapido (4 ms) con un golpe de martillo cortisimo y caida exponencial muy larga y suave en tres tramos
+     - apoyo grave: octava y doble octava por debajo (tambien desafinadas) para cuerpo y presencia
+     - parciales metalicos inarmonicos con una vibracion lenta */
   function ya(ctx){
-    var f = HZ.ya, D = 2.0;
-    parcial(ctx, { f: f, d: D, v: 0.3, atk: 0.002, env: [[0.16, 0.62], [0.9, 0.3], [1.5, 0.07]], resp: { hz: 5.5, prof: 0.1 } });
-    parcial(ctx, { f: f, d: 0.2, v: 0.17, tipo: 'square', lp: 5200, atk: 0.001 });
-    parcial(ctx, { f: f * 1.003, d: 1.8, v: 0.09, atk: 0.004, env: [[0.2, 0.6], [1.2, 0.2]], resp: { hz: 4.2, prof: 0.14 } });
-    parcial(ctx, { f: f / 2, d: 1.6, v: 0.09, atk: 0.004, env: [[0.2, 0.6], [1.0, 0.2]] });
-    parcial(ctx, { f: f * 2, d: 1.5, v: 0.12, atk: 0.002, env: [[0.14, 0.55], [0.8, 0.2], [1.2, 0.06]] });
-    parcial(ctx, { f: f * 2.76, d: 0.9, v: 0.08, atk: 0.001, env: [[0.1, 0.5]] });
-    parcial(ctx, { f: f * 4.07, d: 0.35, v: 0.04, atk: 0.001 });
+    var f = HZ.ya, D = 2.6;
+    parcial(ctx, { f: f * 2, d: 0.04, v: 0.16, tipo: 'square', lp: 6000, atk: 0.001 });
+    [[0.996, 0.085], [0.998, 0.09], [1, 0.1], [1.002, 0.09], [1.005, 0.085]].forEach(function(p, i){
+      parcial(ctx, { f: f * p[0], d: D - i * 0.08, v: p[1], atk: 0.004, env: [[0.25, 0.55], [0.9, 0.27], [1.6, 0.1], [2.1, 0.03]], resp: (i % 2) ? { hz: 5.2 + i * 0.4, prof: 0.08 } : null });
+    });
+    parcial(ctx, { f: f / 2, d: 2.2, v: 0.12, atk: 0.006, env: [[0.3, 0.6], [1.1, 0.2]] });
+    parcial(ctx, { f: f / 2 * 1.003, d: 2.1, v: 0.095, atk: 0.006, env: [[0.3, 0.6], [1.1, 0.2]] });
+    parcial(ctx, { f: f / 4, d: 1.8, v: 0.1, atk: 0.008, env: [[0.3, 0.6], [0.9, 0.2]] });
+    parcial(ctx, { f: f * 2.01, d: 1.7, v: 0.09, atk: 0.003, env: [[0.2, 0.5], [0.8, 0.15]] });
+    parcial(ctx, { f: f * 2.76, d: 1.2, v: 0.065, atk: 0.002, env: [[0.15, 0.5]], resp: { hz: 6.5, prof: 0.15 } });
+    parcial(ctx, { f: f * 4.07, d: 0.5, v: 0.035, atk: 0.002 });
   }
   /* mitad del tiempo objetivo: doble pulso suave (no compite con la cuenta final) */
   function mitad(ctx){
@@ -3728,7 +3746,7 @@ var jpPerfilSonido = (function(){
   }
   function emitir(ev, n){
     try{
-      var ctx = ensureAudioCtx();
+      var ctx = ensureAudioCtx(); if(!ctx) return;
       var tocar = function(){
         if(ev === 'tick') pip(ctx, n);
         else if(ev === 'inicio' || ev === 'fin') ya(ctx);
@@ -3796,14 +3814,17 @@ window.jpBox = jpBox;
   function armar(){ if(armado) return; armado = true; evs.forEach(function(ev){ document.addEventListener(ev, intentar, { capture: true, passive: true }); }); }
   /* se reintenta en cada gesto hasta que el contexto queda en "running" (en iOS touchstart no alcanza: hace falta touchend/click) */
   function intentar(){
-    try{ unlockAudio(); }catch(e){}
-    var c = ensureAudioCtx();
-    if(c.state === 'running'){ quitar(); return; }
-    try{ var p = c.resume(); if(p && p.then) p.then(function(){ if(c.state === 'running') quitar(); }).catch(function(){}); }catch(e2){}
+    try{
+      unlockAudio();
+      var c = ensureAudioCtx();
+      if(!c){ quitar(); return; }      /* sin Web Audio: no hay nada que desbloquear */
+      if(c.state === 'running'){ quitar(); return; }
+      var p = c.resume(); if(p && p.then) p.then(function(){ if(c.state === 'running') quitar(); }).catch(function(){});
+    }catch(e){}
   }
-  armar();
-  /* si el sistema lo interrumpe (llamada, bloqueo de pantalla), vuelve a quedar a la espera del proximo toque */
-  try{ ensureAudioCtx().addEventListener('statechange', function(){ if(_audioCtx.state !== 'running') armar(); }); }catch(e){}
+  try{ armar(); }catch(e){}
+  /* el contexto avisa (statechange, ver ensureAudioCtx) cuando el sistema lo interrumpe: vuelve a quedar a la espera del proximo toque */
+  window.__jpArmarAudio = function(){ try{ armar(); }catch(e){} };
 })();
 function beepCountdown(){ jpBox.cuenta(); }
 function beepGo(){ jpBox.inicio(); }
