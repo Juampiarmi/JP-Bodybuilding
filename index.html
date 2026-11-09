@@ -1561,6 +1561,9 @@ function jpLimpiarNombreEj(s){
   footer.site-footer { max-width: 1140px; margin: 2rem auto 0; padding: 1.5rem 1.25rem 0; text-align: center; border-top: 1px solid var(--border); }
   footer.site-footer p { font-size: 0.72rem; color: var(--text-muted); margin: 2px 0; }
   footer.site-footer b { color: var(--text-secondary); }
+  footer.site-footer .jp-firma{ font-size:.78rem; line-height:1.5; margin-top:10px; padding-top:10px; border-top:1px dashed rgba(255,85,0,.35); color:#C9CFD8; }
+  footer.site-footer .jp-firma .jp-firma-n{ color:#FF5500; letter-spacing:.02em; }
+  footer.site-footer .jp-firma .jp-firma-r{ color:#00E5FF; }
   @media (max-width: 600px) {
     .hero h1 { font-size: 1.75rem; }
     .day-tab { min-width: 64px; padding: 0.65rem 0.7rem; }
@@ -2225,7 +2228,8 @@ function jpLimpiarNombreEj(s){
 <footer class="site-footer">
   <p><b>Coach JP</b> — Programación generada para Juampi Armiñana</p>
   <p>Mesociclo de 4 semanas · Planificación personalizada para Juampi Armiñana</p>
-  <p class="jp-build">build 7/11 12:24</p>
+  <p class="jp-firma"><b class="jp-firma-n">Prof. Juan Pablo Armiñana</b> <span class="jp-firma-d">—</span> <span class="jp-firma-r">Especialista en Biomecánica · Alto Rendimiento Deportivo y Readaptación Física</span></p>
+  <p class="jp-build">build 8/11 21:34</p>
 </footer>
 <div id="guideModal" class="modal-overlay">
   <div class="modal modal-wide">
@@ -3962,25 +3966,71 @@ const WakeLockManager = (function(){
 /* Pantalla siempre encendida mientras corre CUALQUIER cronómetro (descanso entre series, Custom WOD Timer, timers rápidos). Un único candado,
    con un "motivo" por cronómetro: se libera solo cuando ya no queda ninguno activo y se vuelve a pedir al regresar a la app (el sistema lo suelta
    cada vez que la pantalla se bloquea o se cambia de pestaña). */
+/* Reloj sin deriva para los cronómetros: cada pasada se agenda al PRÓXIMO borde de segundo del instante objetivo (refFn devuelve el epoch ms de la meta o del inicio),
+   no "1000 ms desde ahora", así no se acumula atraso aunque el hilo se demore. Un vigilante revive la cadena si el navegador la congeló (pantalla bloqueada, ahorro
+   de batería) y, ante cualquier error en la pasada, el reloj sigue vivo. El estado real SIEMPRE se calcula contra el reloj de pared, nunca contando ticks. */
+function jpTicker(fn, refFn){
+  var t = null, vig = null, activo = false, ultimo = 0;
+  function programar(){
+    clearTimeout(t); t = null;
+    if(!activo) return;
+    var ref = 0; try{ ref = refFn ? Number(refFn()) : 0; }catch(e0){ ref = 0; }
+    var delay = 1000;
+    if(ref > 0 && isFinite(ref)){ delay = (((ref - Date.now()) % 1000) + 1000) % 1000 + 12; }
+    t = setTimeout(pasada, delay);
+  }
+  function pasada(){
+    ultimo = Date.now();
+    try{ fn(); }catch(e1){ try{ console.warn('cronómetro', e1); }catch(e2){} }
+    programar();
+  }
+  return {
+    start: function(){
+      activo = true; ultimo = Date.now(); programar();
+      clearInterval(vig);
+      vig = setInterval(function(){ if(activo && Date.now() - ultimo > 2300) pasada(); }, 1000);
+    },
+    stop: function(){ activo = false; clearTimeout(t); clearInterval(vig); t = null; vig = null; },
+    activo: function(){ return activo; }
+  };
+}
+window.jpTicker = jpTicker;
 const jpWake = (function(){
-  var motivos = {}, sentinel = null, pidiendo = false;
+  var motivos = {}, sentinel = null, pidiendo = false, reintento = null, avisado = false;
   function hay(){ for(var k in motivos){ if(motivos[k]) return true; } return false; }
+  function soporta(){ return 'wakeLock' in navigator; }
   function pedir(){
-    if(sentinel || pidiendo || !hay() || !('wakeLock' in navigator) || document.visibilityState !== 'visible') return;
+    if(sentinel || pidiendo || !hay() || !soporta() || document.visibilityState !== 'visible') return;
     pidiendo = true;
     try{
       navigator.wakeLock.request('screen').then(function(s){
         pidiendo = false;
         if(!hay()){ try{ s.release().catch(function(){}); }catch(e0){} return; }
         sentinel = s;
-        s.addEventListener('release', function(){ if(sentinel === s) sentinel = null; });
+        s.addEventListener('release', function(){ if(sentinel === s){ sentinel = null; if(hay()) setTimeout(pedir, 300); } });
       }).catch(function(){ pidiendo = false; });
     }catch(e1){ pidiendo = false; }
   }
   function soltar(){ if(sentinel){ var s = sentinel; sentinel = null; try{ s.release().catch(function(){}); }catch(e2){} } }
+  /* mientras haya un cronómetro activo y no haya candado, se vuelve a pedir cada 4 s (el sistema lo puede soltar por ahorro de batería o por un permiso que tardó) */
+  function vigilar(){
+    if(reintento) return;
+    reintento = setInterval(function(){
+      if(!hay()){ clearInterval(reintento); reintento = null; return; }
+      if(!sentinel) pedir();
+    }, 4000);
+  }
+  /* sin Wake Lock (navegadores viejos) el teléfono puede bloquearse solo: se avisa una vez para que el alumno lo evite */
+  function avisarSinSoporte(){
+    if(avisado || soporta()) return;
+    avisado = true;
+    try{ if(window.CoachAviso && window.CoachAviso.mostrar) window.CoachAviso.mostrar('fatiga', '💡', 'Mantené la pantalla encendida', 'Tu navegador no puede evitar que el teléfono se bloquee solo: poné el bloqueo automático en "nunca" mientras entrenás para que el reloj no se detenga.', 9000); }catch(e3){}
+  }
   document.addEventListener('visibilitychange', function(){ if(document.visibilityState === 'visible') pedir(); });
+  window.addEventListener('pageshow', pedir);
+  window.addEventListener('focus', pedir);
   return {
-    on: function(m){ motivos[m] = 1; pedir(); },
+    on: function(m){ motivos[m] = 1; pedir(); vigilar(); avisarSinSoporte(); },
     off: function(m){ delete motivos[m]; if(!hay()) soltar(); },
     activo: function(){ return !!sentinel; }
   };
@@ -6469,7 +6519,7 @@ body.nav-stuck .week-selector-wrap,body.nav-stuck .week-tabs-wrap{box-shadow:0 6
     restActive = true; restJustFinished = false;
     hud.classList.toggle('cf-mirrored', !!oculto);
     hud.classList.add('on'); restRun = true;
-    clearInterval(restInt); restInt = setInterval(tick, 1000);
+    if(restInt){ restInt.stop(); } restInt = jpTicker(tick, function(){ return restTargetEnd; }); restInt.start();
     try{ window.jpWake.on('descanso'); }catch(eW){}
     pintarRest();
     mostrarAjusteKgRest();
@@ -6478,7 +6528,7 @@ body.nav-stuck .week-selector-wrap,body.nav-stuck .week-tabs-wrap{box-shadow:0 6
     _restAv = -1;
     try{ jpBgTimer.programar(restTargetEnd); }catch(e){}
   }
-  function pararRest(){ restRun = false; clearInterval(restInt); restInt = null; try{ window.jpWake.off('descanso'); }catch(eW){} pintarRest(); guardarRestTimer(); try{ jpBgTimer.cancelar(); }catch(e){} }
+  function pararRest(){ restRun = false; if(restInt){ restInt.stop(); } restInt = null; try{ window.jpWake.off('descanso'); }catch(eW){} pintarRest(); guardarRestTimer(); try{ jpBgTimer.cancelar(); }catch(e){} }
   /* pausa/reanuda el descanso activo sin cerrarlo -- misma lógica que ya
      tenía el toggle ▶/⏸ de la barra flotante, ahora nombrada aparte para
      que el widget in-situ de CrossFit (jpCfRestOnTick) pueda dispararla
@@ -6487,11 +6537,11 @@ body.nav-stuck .week-selector-wrap,body.nav-stuck .week-tabs-wrap{box-shadow:0 6
     restRun = !restRun;
     if(restRun){
       restTargetEnd = Date.now() + restLeft * 1000;
-      if(!restInt) restInt = setInterval(tick, 1000);
+      if(!restInt){ restInt = jpTicker(tick, function(){ return restTargetEnd; }); restInt.start(); }
       try{ jpBgTimer.programar(restTargetEnd); }catch(e){}
       try{ window.jpWake.on('descanso'); }catch(eW){}
     }else{
-      clearInterval(restInt); restInt = null;
+      if(restInt){ restInt.stop(); } restInt = null;
       try{ jpBgTimer.cancelar(); }catch(e){}
       try{ window.jpWake.off('descanso'); }catch(eW){}
     }
@@ -6579,7 +6629,7 @@ body.nav-stuck .week-selector-wrap,body.nav-stuck .week-tabs-wrap{box-shadow:0 6
       restTotal = rt.total || 90;
       hudLb.textContent = rt.label || 'Descanso';
       hud.classList.add('on'); restRun = true; restActive = true;
-      clearInterval(restInt); restInt = setInterval(tick, 1000);
+      if(restInt){ restInt.stop(); } restInt = jpTicker(tick, function(){ return restTargetEnd; }); restInt.start();
       try{ window.jpWake.on('descanso'); }catch(eW){}
       tick();
       if(restRun) try{ jpBgTimer.programar(restTargetEnd); }catch(e){}
@@ -6684,6 +6734,10 @@ body.nav-stuck .week-selector-wrap,body.nav-stuck .week-tabs-wrap{box-shadow:0 6
     { re:/chipper/i, lb:'CHIPPER', modo:'up' },
     { re:/for\s*time/i, lb:'FOR TIME', modo:'up' },
     { re:/tabata/i, lb:'TABATA', modo:'down' },
+    { re:/\be(\d+)\s*m?om\b/i, lb:'EMOM', modo:'down' },
+    { re:/every\s*\d+(?:[.,]\d+)?\s*(?:min|minutos?|')/i, lb:'EVERY X:00', modo:'down' },
+    { re:/death\s*by/i, lb:'DEATH BY', modo:'down' },
+    { re:/\bladders?\b|escalera\s*(?:ascendente|descendente)/i, lb:'LADDER', modo:'up' },
     { re:/interval/i, lb:'INTERVALOS', modo:'down' }
   ];
   function primerFormato(txt){
@@ -6758,9 +6812,9 @@ body.nav-stuck .week-selector-wrap,body.nav-stuck .week-tabs-wrap{box-shadow:0 6
     }
     var modo = '';
     if(kFmt === 'amrap' || /AMRAP/.test(lb)) modo = 'amrap';
-    else if(kFmt === 'emom' || /EMOM|EVERY/.test(lb)) modo = 'emom';
+    else if(kFmt === 'emom' || /EMOM|EVERY|DEATH/.test(lb)) modo = 'emom';
     else if(kFmt === 'tabata' || /TABATA/.test(lb)) modo = 'tabata';
-    else if(kFmt === 'fortime' || kFmt === 'chipper' || /FOR TIME|CHIPPER/.test(lb)) modo = 'fortime';
+    else if(kFmt === 'fortime' || kFmt === 'chipper' || /FOR TIME|CHIPPER|LADDER/.test(lb)) modo = 'fortime';
     else if(/INTERVALOS/.test(lb)) modo = 'intervalos';
     if(!modo) return null;
     var c = { modo: modo };
@@ -6772,19 +6826,26 @@ body.nav-stuck .week-selector-wrap,body.nav-stuck .week-tabs-wrap{box-shadow:0 6
       var mE = txt.match(/every\s*(\d+)\s*:\s*(\d+)/i);
       var inter = mE ? parseInt(mE[1], 10) * 60 + parseInt(mE[2], 10) : 0;
       if(!inter){ var mE2 = txt.match(/every\s*(\d+(?:\.\d+)?)\s*(?:min|minutos|')/i); if(mE2) inter = Math.round(parseFloat(mE2[1]) * 60); }
+      var mEn = txt.match(/\be(\d+)\s*m?om\b/i);          /* E2OM / E2MOM / E3MOM: el número es el intervalo en minutos */
+      if(!inter && mEn) inter = parseInt(mEn[1], 10) * 60;
       if(!inter && param) inter = seg(param);
       /* "EMOM 16" con 16 cargado como parametro: es la duracion total, no un intervalo de 16 minutos */
       if(inter > 600 && /emom/i.test(txt)) inter = 60;
       if(!(inter >= 5)) inter = 60;
       var mR = txt.match(/\bx\s*(\d+)/i) || txt.match(/(\d+)\s*(?:sets?|rounds?|rondas?)\b/i);
-      var mTot = txt.match(/emom\s*(?:de\s*)?(\d+)/i);
+      var mTot = txt.match(/emom\s*(?:de\s*)?(\d+)/i), mTotE = mEn ? txt.match(/\be\d+\s*m?om\s*(?:de\s*)?(\d+)/i) : null;
       c.intervalo = inter;
       var hayEvery = /\bevery\b/i.test(txt);
       c.rondas = (!hayEvery && mTot) ? parseInt(mTot[1], 10) : mR ? parseInt(mR[1], 10)
         : Math.max(1, Math.round(((mTot ? parseInt(mTot[1], 10) : (minutosDe(block, lineas) || 12)) * 60) / inter));
+      /* "E2MOM 16 min" = 16 minutos en total, no 16 rondas: 8 rondas de 2:00 */
+      if(mEn && mTotE && !/\bx\s*\d/i.test(txt)) c.rondas = Math.max(1, Math.round(parseInt(mTotE[1], 10) * 60 / inter));
+      /* DEATH BY: cada minuto suma una repetición hasta fallar; el reloj queda en intervalos de 1:00 (20 como tope, el alumno corta cuando falla) */
+      if(/death\s*by/i.test(txt)){ c.intervalo = 60; c.rondas = 20; }
     } else if(modo === 'fortime'){
-      var mC = txt.match(/cap\s*(?:de\s*)?(\d+)(?:\s*:\s*(\d+))?/i);
-      c.cap = mC ? parseInt(mC[1], 10) : (param ? Math.round(seg(param) / 60) : 0);
+      /* "Time Cap: 15:00", "cap 12", "cap de 20" y "Time cap - 9:30" (el ':' o el guion después de "cap" es el formato del botón Cap del Builder) */
+      var mC = txt.match(/cap\s*(?:de\s*)?[:\-\u2013]?\s*(\d+)(?:\s*:\s*(\d+))?/i);
+      c.cap = mC ? Math.round((parseInt(mC[1], 10) + (mC[2] ? parseInt(mC[2], 10) / 60 : 0)) * 10) / 10 : (param ? Math.round(seg(param) / 60) : 0);
     } else {
       var mW = txt.match(/(\d+)\s*s?\s*(?:on|work|trabajo)\b/i), mRs = txt.match(/(\d+)\s*s?\s*(?:off|rest|descanso)\b/i);
       var mRd = txt.match(/(\d+)\s*(?:rounds?|rondas?|sets?)\b/i);
@@ -6815,11 +6876,12 @@ body.nav-stuck .week-selector-wrap,body.nav-stuck .week-tabs-wrap{box-shadow:0 6
     var txt = lineas.join(' ') + ' ' + (block.title || ''), fmt = '', cap = '';
     function mm(sg){ sg = Math.round(sg); return Math.floor(sg / 60) + ':' + ('0' + (sg % 60)).slice(-2); }
     if(cfg.modo === 'amrap') fmt = 'AMRAP ' + cfg.total + ' MIN';
-    else if(cfg.modo === 'emom') fmt = cfg.intervalo === 60 ? 'EMOM ' + Math.round(cfg.rondas) + ' MIN' : 'EVERY ' + mm(cfg.intervalo) + ' × ' + cfg.rondas;
+    else if(cfg.modo === 'emom') fmt = /death\s*by/i.test(txt) ? 'DEATH BY · CADA 1:00' : (cfg.intervalo === 60 ? 'EMOM ' + Math.round(cfg.rondas) + ' MIN' : 'EVERY ' + mm(cfg.intervalo) + ' × ' + cfg.rondas);
     else if(cfg.modo === 'tabata') fmt = 'TABATA ' + cfg.rondas + ' RONDAS';
     else if(cfg.modo === 'fortime'){
       var mR = txt.match(/(\d+)\s*(?:rounds?|rondas?)\b/i), esq = txt.match(/\b(\d+(?:\s*-\s*\d+){1,})\b/);
       if(/chipper/i.test(txt)) fmt = 'CHIPPER';
+      else if(/\bladders?\b/i.test(txt)) fmt = 'LADDER · FOR TIME';
       else if(mR) fmt = mR[1] + ' RONDAS FOR TIME';
       else if(esq) fmt = 'FOR TIME · ' + esq[1].replace(/\s+/g, '');
       else fmt = 'FOR TIME';
@@ -6832,6 +6894,16 @@ body.nav-stuck .week-selector-wrap,body.nav-stuck .week-tabs-wrap{box-shadow:0 6
     var lbN = { development: 'Development', advanced: 'Advanced', rx: 'RX', elite: 'Elite' }[nvA] || 'Rx';
     var cargasN = rx.length ? rx : ((esEsc && sc.length) ? sc : []);
     var chips = cargasN.length ? '<span class="jp-cf-chip"><b>' + lbN + '</b> ' + escSB(cargasN.join(' · ')) + '</span>' : '';
+    /* etiquetas de dinámica: partners, relación de descanso e híbrido tipo Hyrox (se leen del propio texto del bloque, no se inventan) */
+    var txtT = lineas.join(' ') + ' ' + (block.title || '') + ' ' + (block.subtitle || ''), tags = [];
+    if(/i\s*go\s*,?\s*you\s*go|\bigyg\b|yo\s*voy\s*,?\s*vos\s*vas/i.test(txtT)) tags.push('I GO · YOU GO');
+    else if(/sincroniz|synchro/i.test(txtT)) tags.push('PARTNERS · SINCRONIZADO');
+    else if(/\bpartners?\b|en\s*parejas|\bpairs?\b/i.test(txtT)) tags.push('PARTNERS');
+    var rrT = /rest\s*(\d)\s*:\s*(\d)(?!\d)/i.exec(txtT);
+    if(rrT) tags.push('DESCANSO ' + rrT[1] + ':' + rrT[2] + ' · TRABAJO:DESCANSO');
+    var estT = ['hyrox', 'skierg', 'ski erg', 'sled', 'farmer', 'sandbag', 'wall ball', 'rowerg', 'burpee broad'].filter(function(k){ return txtT.toLowerCase().indexOf(k) >= 0; }).length;
+    if(estT >= 2) tags.push('HYBRID · ESTACIONES');
+    chips += tags.map(function(t){ return '<span class="jp-cf-chip jp-cf-dyn">' + escSB(t) + '</span>'; }).join('');
     return '<div class="jp-cf-fmtbadge">[ ' + escSB(fmt) + ' ]</div>' +
       ((cap || pac) ? '<div class="jp-cf-capline">' + (cap ? '<span class="cap">' + cap + '</span>' : '') + (pac ? '<span class="pac">🎯 PACING: ' + escSB(pac) + '</span>' : '') + '</div>' : '') +
       (chips ? '<div class="jp-cf-chips">' + chips + '</div>' : '');
@@ -10388,7 +10460,7 @@ body.nav-stuck .week-selector-wrap,body.nav-stuck .week-tabs-wrap{box-shadow:0 6
           (en.subs || []).forEach(function(sb){ if(sb.tempo) add(sb.nombre, sb.tempo); });
         }
       });
-      return filasT.length ? '<div class="jp-sb-pauta"><div class="jp-sb-pauta-lb">\u23f1 TEMPO (CADENCIA)</div><div class="jp-sb-pauta-txt">' + filasT.join('') + '</div></div>' : '';
+      return filasT.length ? '<div class="jp-sb-pauta"><div class="jp-sb-pauta-lb jp-lb-tempo">\u23f1 TEMPO (CADENCIA)</div><div class="jp-sb-pauta-txt">' + filasT.join('') + '</div></div>' : '';
     })();
     const tieneObjTips = objetivoHtml || tipsHtml;
     const tieneAcc = tieneObjTips || !!tempoHtml;
@@ -10413,8 +10485,8 @@ body.nav-stuck .week-selector-wrap,body.nav-stuck .week-tabs-wrap{box-shadow:0 6
         (tieneAcc ?
           '<details class="jp-block-details"><summary class="jp-summary-btn"><svg class="jp-pauta-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18h6M10 21h4M12 3a6 6 0 0 0-3.6 10.8c.6.5 1 1.2 1 2v.2h5.2v-.2c0-.8.4-1.5 1-2A6 6 0 0 0 12 3z"/></svg><span>PAUTAS T\u00c9CNICAS &amp; TIPS DEL BLOQUE</span></summary>' +
             '<div class="jp-details-content">' +
-              (objetivoHtml ? '<div class="jp-sb-pauta"><div class="jp-sb-pauta-lb">&#127919; OBJETIVO FISIOL&Oacute;GICO</div><div class="jp-sb-pauta-txt">' + objetivoHtml + '</div></div>' : '') +
-              (tipsHtml ? '<div class="jp-sb-pauta"><div class="jp-sb-pauta-lb">&#128161; ESTRATEGIA BIOMEC&Aacute;NICA &amp; TIPS</div><div class="jp-sb-pauta-txt">' + tipsHtml + '</div></div>' : '') +
+              (objetivoHtml ? '<div class="jp-sb-pauta"><div class="jp-sb-pauta-lb jp-lb-obj">&#127919; OBJETIVO FISIOL&Oacute;GICO</div><div class="jp-sb-pauta-txt">' + objetivoHtml + '</div></div>' : '') +
+              (tipsHtml ? '<div class="jp-sb-pauta"><div class="jp-sb-pauta-lb jp-lb-tips">&#128161; ESTRATEGIA BIOMEC&Aacute;NICA &amp; TIPS</div><div class="jp-sb-pauta-txt">' + tipsHtml + '</div></div>' : '') +
               tempoHtml +
             '</div>' +
           '</details>' : '') +
@@ -15459,6 +15531,8 @@ body.cf-disc .week-pill.wpc-cf::after{content:none !important}
       continue;
     }
   }
+  /* instante de referencia del reloj: el fin de la fase (cuenta regresiva) o el inicio (cuenta arriba) */
+  function refTick(){ return fase === 'up' ? transcurridoStart : faseTargetEnd; }
   function arrancar(){
     desbloquearAudio();      /* dentro del tap: en iOS/Chrome movil el contexto solo arranca asi */
     if(corriendo){ pausar(); return; }
@@ -15478,8 +15552,8 @@ body.cf-disc .week-pill.wpc-cf::after{content:none !important}
        (iOS/Chrome móvil) y se pide, una sola vez, el permiso de notificaciones */
     jpBox.inicio(); vibrar([30]);
     try{ jpBgTimer.pedirPermiso(); }catch(e){}
-    clearInterval(tick);
-    tick = setInterval(paso, 1000);
+    if(tick) tick.stop();
+    tick = jpTicker(paso, refTick); tick.start();
     despierto(true);
     pintar();
     /* timestampFin absoluto del entrenamiento completo -> aviso en segundo plano */
@@ -15498,7 +15572,7 @@ body.cf-disc .week-pill.wpc-cf::after{content:none !important}
     if(fase !== 'up') restante = Math.max(0, Math.round((faseTargetEnd - now) / 1000));
     if(fase !== 'prep') transcurrido = transcurridoBase + Math.round((now - transcurridoStart) / 1000);
     corriendo = false;
-    clearInterval(tick); tick = null;
+    if(tick){ tick.stop(); } tick = null;
     despierto(false);
     try{ jpBgTimer.cancelar(); }catch(e){}
     document.getElementById('cwtGo').textContent = '▶ Continuar';
@@ -15514,7 +15588,7 @@ body.cf-disc .week-pill.wpc-cf::after{content:none !important}
      tiempo viejo. */
   function sincronizarWodActivo(){ if(corriendo) paso(); }
   function reset(){
-    corriendo = false; clearInterval(tick); tick = null;
+    corriendo = false; if(tick){ tick.stop(); } tick = null;
     despierto(false);
     try{ jpBgTimer.cancelar(); }catch(e){}
     estadoInicial();
@@ -15524,7 +15598,7 @@ body.cf-disc .week-pill.wpc-cf::after{content:none !important}
   }
   function finalizar(motivo, silencioso){
     try{ document.dispatchEvent(new CustomEvent('jp-wod-fin', { detail: { modo: modo, seg: transcurrido, motivo: String(motivo || '') } })); }catch(eFin){}
-    corriendo = false; clearInterval(tick); tick = null;
+    corriendo = false; if(tick){ tick.stop(); } tick = null;
     despierto(false);
     /* chicharra larga de fin de round. Si el fin ocurrió hace rato (el
        celular estuvo bloqueado), ya avisó la notificación: no se hace sonar
@@ -17162,8 +17236,8 @@ body.ses-paused .set-tracker,body.ses-paused .jp-tools,body.ses-paused .rir-bar{
       if(board && !board.dataset.tipo){
         var fmtEl = board.querySelector('.wb-fmt');
         var t = (fmtEl ? fmtEl.textContent : '') + ' ' + board.textContent;
-        var k = /amrap/i.test(t) ? 'amrap' : /emom|every/i.test(t) ? 'emom'
-              : /tabata/i.test(t) ? 'tabata' : /for time|rft|chipper|rounds? for time/i.test(t) ? 'fortime' : '';
+        var k = /amrap/i.test(t) ? 'amrap' : /emom|e\d+m?om|every/i.test(t) ? 'emom'
+              : /tabata/i.test(t) ? 'tabata' : /for time|rft|chipper|ladder|rounds? for time/i.test(t) ? 'fortime' : '';
         if(k){
           board.dataset.tipo = k;
           board.classList.add('b-' + k);
@@ -17811,9 +17885,9 @@ body.cf-modo .block .directive-chip{display:none !important}
   function fmtDe(txt){
     var t = String(txt || '');
     if(/\bamrap\b/i.test(t))  return { k:'amrap',   lb:'🟢 AMRAP' };
-    if(/\bemom\b|every\s*\d/i.test(t)) return { k:'emom', lb:'🔵 EMOM' };
+    if(/\bemom\b|\be\d+m?om\b|every\s*\d/i.test(t)) return { k:'emom', lb:'🔵 EMOM' };
     if(/\btabata\b/i.test(t)) return { k:'tabata',  lb:'🟡 TABATA' };
-    if(/for\s*time|\brft\b|rounds?\s*for\s*time|chipper/i.test(t)) return { k:'fortime', lb:'🔴 FOR TIME' };
+    if(/for\s*time|\brft\b|rounds?\s*for\s*time|chipper|\bladders?\b/i.test(t)) return { k:'fortime', lb:'🔴 FOR TIME' };
     return null;
   }
   function lineasDe(bl){
@@ -32722,10 +32796,9 @@ body.jp-mission .hdc-chip-row .jp-status-pill{ padding:1px 6px !important; }
     var kg = kgN.toLocaleString('es-AR');
     var rir = 'RIR OBJ';
     try{ var m = /RIR\s*([0-9][0-9–-]*)/i.exec((WEEKS_META[state.currentWeek] || {}).rpe || ''); if(m) rir = 'RIR ' + m[1]; }catch(e){}
-    /* sin tonelaje registrado la tarjeta no se muestra (antes quedaba un guion suelto) */
-    var hayTon = kgN > 0;
+    /* las 3 métricas están siempre: grilla simétrica de 3 columnas (sin series registradas el tonelaje es 0, nunca un guion ni NaN) */
     var pildora = function(v, l){ return '<span><b>' + v + '</b><small>' + l + '</small></span>'; };
-    var h = (hayTon ? pildora(kg, 'KG TONELAJE') : '') + pildora(nB, nB === 1 ? 'BLOQUE' : 'BLOQUES') + pildora(rir === 'RIR OBJ' ? '&mdash;' : rir.replace('RIR ', ''), 'RIR OBJETIVO');
+    var h = pildora(kg, 'KG TONELAJE') + pildora(nB, nB === 1 ? 'BLOQUE' : 'BLOQUES') + pildora(rir === 'RIR OBJ' ? '&mdash;' : rir.replace('RIR ', ''), 'RIR OBJETIVO');
     var hud = $('.jp-brief-hud', dh);
     if(!hud){ hud = document.createElement('div'); hud.className = 'jp-brief-hud'; dh.appendChild(hud); }
     if(hud.__h !== h){ hud.__h = h; hud.innerHTML = h; }
@@ -36463,6 +36536,47 @@ html body:not(#_).jp-mission:not(.cf-disc) .jp-sb-biset-title{ color:#00E5FF !im
 html body:not(#_).jp-mission:not(.cf-disc) .jp-nom-en{ font-size:.8rem !important; opacity:.78; }
 html body:not(#_).jp-mission:not(.cf-disc) .jp-sb-subex-resumen{ margin-top:4px !important; }
 html body:not(#_).jp-mission:not(.cf-disc) .jp-sb-subex-resumen .jp-dose-bar .jp-db-row{ gap:4px !important; }
+/* ===== CrossFit / Hyrox: misma identidad HUD (naranja + cian) que Bodybuilding ===== */
+html body:not(#_).cf-disc .hd-compact{ background:linear-gradient(180deg, rgba(255,85,0,.13) 0%, rgba(10,10,10,.97) 70%), #0A0A0A !important; border-bottom:1px solid rgba(255,85,0,.42) !important; box-shadow:0 12px 28px -18px rgba(0,229,255,.34) !important; }
+html body:not(#_).cf-disc .hdc-brand-mark{ color:#FF5500 !important; font-size:.72rem !important; letter-spacing:.22em !important; font-weight:800 !important; }
+html body:not(#_).cf-disc .hdc-brand-mark em{ color:#FFFFFF !important; font-style:normal !important; text-shadow:0 0 12px rgba(255,85,0,.6); }
+html body:not(#_).cf-disc #hdcName{ font-size:1.28rem !important; line-height:1.15 !important; font-weight:800 !important; letter-spacing:.01em !important; color:#FFFFFF !important; text-shadow:0 0 20px rgba(255,85,0,.3); }
+html body:not(#_).cf-disc .jp-status-pill.jp-status-active{ color:#00E5FF !important; border-color:rgba(0,229,255,.75) !important; background:rgba(0,229,255,.1) !important; box-shadow:0 0 12px rgba(0,229,255,.4), inset 0 0 8px rgba(0,229,255,.14) !important; font-size:.62rem !important; padding:2px 8px !important; letter-spacing:.12em !important; }
+html body:not(#_).cf-disc .hdc-shield{ border-color:rgba(255,85,0,.65) !important; box-shadow:0 0 18px rgba(255,85,0,.4), inset 0 0 10px rgba(255,85,0,.12) !important; }
+html body:not(#_).cf-disc .jp-ux-menu-btn, html body:not(#_).cf-disc .hdc-info, html body:not(#_).cf-disc .hdc-fz, html body:not(#_).cf-disc .jp-prs-quickbtn{ border-color:rgba(255,85,0,.4) !important; background:rgba(255,85,0,.07) !important; color:#FF8A3D !important; }
+html body:not(#_).cf-disc .hdc-fz .hdc-fz-tx{ color:#FF8A3D !important; }
+html body:not(#_).cf-disc #jpWkBtn{ border:1px solid rgba(255,85,0,.75) !important; background:linear-gradient(180deg, rgba(255,85,0,.26), rgba(255,85,0,.08)) !important; box-shadow:0 0 16px -4px rgba(255,85,0,.55) !important; }
+html body:not(#_).cf-disc #jpWkBtn b{ color:#FFFFFF !important; letter-spacing:.06em; }
+html body:not(#_).cf-disc #jpWkBtn i{ color:#FF5500 !important; }
+html body:not(#_).cf-disc #jpDayBtn{ border:1px solid rgba(0,229,255,.6) !important; background:linear-gradient(180deg, rgba(0,229,255,.16), rgba(0,229,255,.04)) !important; box-shadow:0 0 16px -4px rgba(0,229,255,.5) !important; }
+html body:not(#_).cf-disc #jpDayBtn i, html body:not(#_).cf-disc #jpDayBtn .jp-day-ic{ color:#00E5FF !important; }
+html body:not(#_).cf-disc .jp-wk-pop{ border:1px solid rgba(255,85,0,.45) !important; box-shadow:0 18px 40px -12px rgba(0,0,0,.8), 0 0 22px -6px rgba(255,85,0,.35) !important; }
+html body:not(#_).cf-disc .jp-wk-pop button.on{ background:rgba(255,85,0,.16) !important; border-color:rgba(255,85,0,.65) !important; }
+html body:not(#_).cf-disc .jp-wk-pop button.on b{ color:#FF5500 !important; }
+html body:not(#_).cf-disc .jp-wk-pop button small{ color:#7FE9FF !important; }
+html body:not(#_).cf-disc .day-title{ border-left:4px solid #FF5500 !important; padding-left:12px !important; }
+html body:not(#_).cf-disc .jp-cf-fmtbadge{ color:#FF5500 !important; text-shadow:0 0 18px rgba(255,85,0,.35); }
+html body:not(#_).cf-disc .jp-cf-capline .cap{ color:#00E5FF !important; font-weight:800 !important; }
+html body:not(#_).cf-disc .jp-cf-chip{ border:1px solid rgba(0,229,255,.4) !important; background:rgba(0,229,255,.08) !important; color:#EDEFF2 !important; }
+html body:not(#_).cf-disc .jp-cf-chip b{ color:#FF5500 !important; }
+html body:not(#_).cf-disc .jp-cf-chip.jp-cf-dyn{ border-color:rgba(255,85,0,.55) !important; background:rgba(255,85,0,.1) !important; color:#FF8A3D !important; font-weight:800 !important; letter-spacing:.08em !important; }
+/* botonera superior: cuadrícula simétrica de 3 métricas + «Ver directiva táctica» a todo el ancho */
+html body:not(#_).jp-mission:not(.cf-disc) .day-header .jp-brief-hud{ display:grid !important; grid-template-columns:repeat(3, minmax(0,1fr)) !important; grid-auto-flow:row !important; grid-auto-columns:auto !important; gap:8px !important; margin:14px 0 0 !important; width:100% !important; box-sizing:border-box; }
+html body:not(#_).jp-mission:not(.cf-disc) .day-header .jp-brief-hud > span{ min-width:0 !important; min-height:64px; box-sizing:border-box !important; padding:10px 4px !important; border-radius:12px !important; border:1px solid rgba(255,255,255,.16) !important; background:rgba(255,255,255,.04) !important; }
+html body:not(#_).jp-mission:not(.cf-disc) .day-header .jp-brief-hud > span b{ font-size:1.18rem !important; color:#FFFFFF !important; white-space:nowrap; }
+html body:not(#_).jp-mission:not(.cf-disc) .day-header .jp-brief-hud > span small{ color:#B6BDC8 !important; font-size:.56rem !important; letter-spacing:.1em !important; white-space:nowrap; }
+html body:not(#_).jp-mission:not(.cf-disc) .day-header .jp-brief-hud > span:nth-child(1){ border-color:rgba(255,85,0,.6) !important; background:linear-gradient(180deg, rgba(255,85,0,.16), rgba(255,85,0,.03)) !important; box-shadow:0 0 14px -6px rgba(255,85,0,.55); }
+html body:not(#_).jp-mission:not(.cf-disc) .day-header .jp-brief-hud > span:nth-child(1) b{ color:#FF5500 !important; }
+html body:not(#_).jp-mission:not(.cf-disc) .day-header .jp-brief-hud > span:nth-child(3){ border-color:rgba(0,229,255,.55) !important; background:linear-gradient(180deg, rgba(0,229,255,.12), rgba(0,229,255,.02)) !important; box-shadow:0 0 14px -6px rgba(0,229,255,.5); }
+html body:not(#_).jp-mission:not(.cf-disc) .day-header .jp-brief-hud > span:nth-child(3) b{ color:#00E5FF !important; }
+html body:not(#_).jp-mission:not(.cf-disc) .day-header .jp-brief-dir{ align-self:stretch !important; display:flex !important; width:100% !important; box-sizing:border-box !important; align-items:center; justify-content:center; gap:8px; min-height:46px !important; height:auto !important; margin:8px 0 0 !important; border:1px solid rgba(0,229,255,.6) !important; border-radius:12px !important; background:rgba(0,229,255,.07) !important; color:#00E5FF !important; font-weight:800 !important; letter-spacing:.12em !important; box-shadow:0 0 14px -6px rgba(0,229,255,.5); }
+/* títulos de los acordeones de pautas: sin grises, cian o naranja del branding */
+html body:not(#_).jp-mission:not(.cf-disc) .jp-sb-board .jp-sb-pauta > .jp-sb-pauta-lb, html body:not(#_).jp-mission:not(.cf-disc) .jp-sb-board .jp-sb-pauta > .jp-sb-pauta-lb .jp-emo{ color:#00E5FF !important; text-shadow:0 0 14px rgba(0,229,255,.28); }
+html body:not(#_).jp-mission:not(.cf-disc) .jp-sb-board .jp-sb-pauta > .jp-sb-pauta-lb::before, html body:not(#_).jp-mission:not(.cf-disc) .jp-sb-board .jp-sb-pauta > .jp-sb-pauta-lb::after{ color:#FF5500 !important; }
+html body:not(#_).jp-mission:not(.cf-disc) .jp-sb-board .jp-sb-pauta > .jp-sb-pauta-lb.jp-lb-tips, html body:not(#_).jp-mission:not(.cf-disc) .jp-sb-board .jp-sb-pauta > .jp-sb-pauta-lb.jp-lb-tips .jp-emo{ color:#FF7A1F !important; text-shadow:0 0 14px rgba(255,85,0,.3); }
+html body:not(#_).jp-mission:not(.cf-disc) .jp-sb-board .jp-sb-pauta > .jp-sb-pauta-lb.jp-lb-tips::before, html body:not(#_).jp-mission:not(.cf-disc) .jp-sb-board .jp-sb-pauta > .jp-sb-pauta-lb.jp-lb-tips::after{ color:#00E5FF !important; }
+html body:not(#_).jp-mission:not(.cf-disc) .jp-sb-board .jp-sb-pauta:has(> .jp-lb-tips){ border-left-color:rgba(255,85,0,.65) !important; }
+html body:not(#_).jp-mission:not(.cf-disc) .jp-sb-board .jp-sb-pauta:has(> .jp-lb-obj), html body:not(#_).jp-mission:not(.cf-disc) .jp-sb-board .jp-sb-pauta:has(> .jp-lb-tempo){ border-left-color:rgba(0,229,255,.65) !important; }
 html body:not(#_) #jpCerrarDiaBtn.jp-close-cta{ background:#FF5500 !important; border:1px solid #FF5500 !important; color:#0D0D0D !important; font-weight:800 !important; letter-spacing:.08em !important; min-height:56px !important; box-shadow:0 10px 26px -12px rgba(255,85,0,.7) !important; }
 html body:not(#_) #jpCerrarDiaBtn.jp-close-cta:active{ transform:scale(.98); }
 html body:not(#_) #storyCtaBtn.story-cta{ background:transparent !important; border:1px solid rgba(130,138,151,.5) !important; color:#EDEFF2 !important; box-shadow:none !important; }</style>
